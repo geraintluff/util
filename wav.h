@@ -68,54 +68,62 @@ public:
 		}
 	};
 	
-	unsigned int sampleRate = 48000;
-	unsigned int channels = 1, offset = 0;
+	size_t sampleRate = 48000;
+	size_t channels = 1, offset = 0;
 	std::vector<double> samples;
-	int length() const {
+	size_t length() const {
 		return samples.size()/channels - offset;
 	}
-	void resize(int length) {
+	void resize(size_t length) {
 		samples.resize((offset + length)*channels, 0);
 	}
 	template<bool isConst>
 	class ChannelReader {
 		using CSample = typename std::conditional<isConst, const double, double>::type;
 		CSample *data;
-		int stride;
+		size_t stride;
 	public:
-		ChannelReader(CSample *samples, int channels) : data(samples), stride(channels) {}
+		ChannelReader(CSample *samples, size_t channels) : data(samples), stride(channels) {}
 		
-		CSample & operator [](int i) {
+		CSample & operator [](size_t i) {
 			return data[i*stride];
 		}
 	};
-	ChannelReader<false> operator [](int c) {
+	ChannelReader<false> operator [](size_t c) {
 		return ChannelReader<false>(samples.data() + offset*channels + c, channels);
 	}
-	ChannelReader<true> operator [](int c) const {
+	ChannelReader<true> operator [](size_t c) const {
 		return ChannelReader<true>(samples.data() + offset*channels + c, channels);
 	}
 	
 	Result result = Result(Result::Code::OK);
 
 	Wav() {}
-	Wav(double sampleRate, int channels) : sampleRate(sampleRate), channels(channels) {}
-	Wav(double sampleRate, int channels, const std::vector<double> &samples) : sampleRate(sampleRate), channels(channels), samples(samples) {}
+	Wav(double sampleRate, size_t channels) : sampleRate(sampleRate), channels(channels) {}
+	Wav(double sampleRate, size_t channels, const std::vector<double> &samples) : sampleRate(sampleRate), channels(channels), samples(samples) {}
 	Wav(std::string filename) {
 		result = read(filename).warn();
 	}
 	
 	enum class Format {
-		PCM=1,
-		FLOAT=3
+		invalid,
+		int16,
+		int24,
+		float32
 	};
-	bool formatIsValid(uint16_t format, uint16_t bits) const {
-		if (format == (uint16_t)Format::PCM) {
-			return (bits == 16 || bits == 24);
-		} else if (format == (uint16_t)Format::FLOAT) {
-			return (bits == 32);
+	static constexpr Format formatInvalid = Format::invalid;
+	static constexpr Format formatInt16 = Format::int16;
+	static constexpr Format formatInt24 = Format::int24;
+	static constexpr Format formatFloat32 = Format::float32;
+
+	Format getFormat(uint16_t format, uint16_t bits) const {
+		if (format == 1/*PCM*/) {
+			if (bits == 16) return formatInt16;
+			if (bits == 24) return formatInt24;
+		} else if (format == 3/*float*/) {
+			if (bits == 32) return formatFloat32;
 		}
-		return false;
+		return formatInvalid;
 	}
 	
 	Result read(std::string filename) {
@@ -131,8 +139,7 @@ public:
 		auto blockStart = file.tellg(); // start of the blocks - we will seek back to here periodically
 		bool hasFormat = false, hasData = false;
 		
-		Format format = Format::PCM; // Shouldn't matter, we should always read the `fmt ` chunk before `data`
-		unsigned int bitsPerSample = 16;
+		Format format = Format::invalid; // Shouldn't matter, we should always read the `fmt ` chunk before `data`
 		while (!file.eof()) {
 			auto blockType = read32(file), blockLength = read32(file);
 			if (file.eof()) break;
@@ -145,10 +152,11 @@ public:
 				sampleRate = read32(file);
 				if (sampleRate < 1) return result = Result(Result::Code::FORMAT_ERROR, "Cannot have zero sampleRate");
 
-				unsigned int expectedBytesPerSecond = read32(file);
-				unsigned int bytesPerFrame = read16(file);
-				bitsPerSample = read16(file);
-				if (!formatIsValid(formatInt, bitsPerSample)) return result = Result(Result::Code::UNSUPPORTED, "Unsupported format:bits: " + std::to_string(formatInt) + ":" + std::to_string(bitsPerSample));
+				auto expectedBytesPerSecond = read32(file);
+				auto bytesPerFrame = read16(file);
+				auto bitsPerSample = read16(file);
+				format = getFormat(formatInt, bitsPerSample);
+				if (!format == formatInvalid) return result = Result(Result::Code::UNSUPPORTED, "Unsupported format:bits: " + std::to_string(formatInt) + ":" + std::to_string(bitsPerSample));
 				// Since it's plain WAVE, we can do some extra checks for consistency
 				if (bitsPerSample*channels != bytesPerFrame*8) return result = Result(Result::Code::FORMAT_ERROR, "Format sizes don't add up");
 				if (expectedBytesPerSecond != sampleRate*bytesPerFrame) return result = Result(Result::Code::FORMAT_ERROR, "Format sizes don't add up");
@@ -158,41 +166,37 @@ public:
 				file.seekg(blockStart);
 			} else if (hasFormat && blockType == value_data) {
 				std::vector<double> samples(0);
-				if (format == Format::PCM) {
-					if (bitsPerSample == 16) {
-						samples.reserve(blockLength/2);
-						for (size_t i = 0; i < blockLength/2; ++i) {
-							uint16_t value = read16(file);
-							if (file.eof()) break;
-							if (value >= 32768) {
-								samples.push_back(((double)value - 65536)/32768);
-							} else {
-								samples.push_back((double)value/32768);
-							}
-						}
-					} else {
-						samples.reserve(blockLength/3);
-						for (size_t i = 0; i < blockLength/3; ++i) {
-							uint32_t value = read24(file);
-							if (file.eof()) break;
-							if (value >= 8388608) {
-								samples.push_back(((double)value - 16777216)/8388608);
-							} else {
-								samples.push_back((double)value/8388608);
-							}
+				if (format == formatInt16) {
+					samples.reserve(blockLength/2);
+					for (size_t i = 0; i < blockLength/2; ++i) {
+						uint16_t value = read16(file);
+						if (file.eof()) break;
+						if (value >= 32768) {
+							samples.push_back(((double)value - 65536)/32768);
+						} else {
+							samples.push_back((double)value/32768);
 						}
 					}
-				} else if (format == Format::FLOAT) {
-					if (bitsPerSample == 32) {
-						samples.reserve(blockLength/4);
-						for (size_t i = 0; i < blockLength/4; ++i) {
-							uint32_t intValue = read32(file);
-							if (file.eof()) break;
-							float floatValue;
-							static_assert(sizeof(float) == sizeof(uint32_t), "floats must be 32-bit");
-							std::memcpy(&floatValue, &intValue, sizeof(float));
-							samples.push_back(floatValue);
+				} else if (format == formatInt24) {
+					samples.reserve(blockLength/3);
+					for (size_t i = 0; i < blockLength/3; ++i) {
+						uint32_t value = read24(file);
+						if (file.eof()) break;
+						if (value >= 8388608) {
+							samples.push_back(((double)value - 16777216)/8388608);
+						} else {
+							samples.push_back((double)value/8388608);
 						}
+					}
+				} else if (format == formatFloat32) {
+					samples.reserve(blockLength/4);
+					for (size_t i = 0; i < blockLength/4; ++i) {
+						uint32_t intValue = read32(file);
+						if (file.eof()) break;
+						float floatValue;
+						static_assert(sizeof(float) == sizeof(uint32_t), "floats must be 32-bit");
+						std::memcpy(&floatValue, &intValue, sizeof(float));
+						samples.push_back(floatValue);
 					}
 				}
 				while (samples.size()%channels != 0) {
@@ -211,7 +215,7 @@ public:
 		return result = Result(Result::Code::OK);
 	}
 	
-	Result write(std::string filename, Format format=Format::PCM) {
+	Result write(std::string filename, Format format=formatInt16) {
 		if (channels == 0 || channels > 65535) return result = Result(Result::Code::WEIRD_CONFIG, "Invalid channel count");
 		if (sampleRate <= 0 || sampleRate > 0xFFFFFFFFu) return result = Result(Result::Code::WEIRD_CONFIG, "Invalid sample rate");
 		
@@ -219,14 +223,19 @@ public:
 		file.open(filename, std::ios::binary);
 		if (!file.is_open()) return result = Result(Result::Code::IO_ERROR, "Failed to open file: " + filename);
 		
-		int bytesPerSample;
-		switch (format) {
-		case Format::PCM:
+		int formatCode = 0;
+		int bytesPerSample = 0;
+		if (format == formatInt16) {
+			formatCode = 1;
 			bytesPerSample = 2;
-			break;
-		case Format::FLOAT:
+		} else if (format == formatInt24) {
+			formatCode = 1;
+			bytesPerSample = 3;
+		} else if (format == formatFloat32) {
+			formatCode = 3;
 			bytesPerSample = 4;
-			break;
+		} else {
+			return result = Result(Result::Code::FORMAT_ERROR, "invalid format");
 		}
 		
 		// File size - 44 bytes is RIFF header, "fmt" block, and "data" block header
@@ -252,7 +261,7 @@ public:
 		write32(file, value_data);
 		write32(file, dataLength);
 		switch (format) {
-		case Format::PCM:
+		case formatInt16:
 			for (unsigned int i = offset*channels; i < samples.size(); i++) {
 				double value = samples[i]*32768;
 				if (value > 32767) value = 32767;
@@ -261,7 +270,16 @@ public:
 				write16(file, (uint16_t)value);
 			}
 			break;
-		case Format::FLOAT:
+		case formatInt24:
+			for (unsigned int i = offset*channels; i < samples.size(); i++) {
+				double value = samples[i]*8388608;
+				if (value > 8388607) value = 8388607;
+				if (value <= -8388608) value = -8388608;
+				if (value < 0) value += 16777216;
+				write24(file, (uint32_t)value);
+			}
+			break;
+		case formatFloat32:
 			for (unsigned int i = offset*channels; i < samples.size(); i++) {
 				float floatValue = float(samples[i]);
 				uint32_t intValue;
