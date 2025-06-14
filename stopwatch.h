@@ -1,5 +1,4 @@
-#ifndef SIGNALSMITH_STOPWATCH_UTIL_H
-#define SIGNALSMITH_STOPWATCH_UTIL_H
+#pragma once
 
 #include <limits>
 #include <cmath>
@@ -101,4 +100,3 @@ public:
 };
 
 } // namespace
-#endif // include guard

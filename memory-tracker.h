@@ -1,6 +1,5 @@
-/* Currently only working/tested on Mac.  You need to compile in `memory-tracker.cpp` as well, which does the actual stuff */
-#ifndef SIGNALSMITH_UTIL_MEMORY_TRACKER_H
-#define SIGNALSMITH_UTIL_MEMORY_TRACKER_H
+/* Currently only working/tested on Mac.  You need to compile in `memory-tracker.hxx` as well, which does the actual stuff */
+#pragma once
 
 #include <cstddef>
 
@@ -26,4 +25,3 @@ private:
 };
 
 } // namespace
-#endif // include guard

@@ -1,5 +1,4 @@
-#ifndef RIFF_WAVE_H_
-#define RIFF_WAVE_H_
+#pragma once
 
 #include <vector>
 #include <iostream>
@@ -319,5 +318,3 @@ public:
 		}
 	}
 };
-
-#endif // RIFF_WAVE_H_
