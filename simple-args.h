@@ -116,6 +116,9 @@ class SimpleArgs {
 
 	int index = 1;
 public:
+	// If not constructed with arguments, it should not be used
+	SimpleArgs() : argc(0), argv(nullptr) {}
+	
 	SimpleArgs(int argc, const char* const argv[]) : argc(argc), argv(argv) {
 		std::string cmd = argv[0];
 		size_t slashPos = cmd.find_last_of("\\/");
