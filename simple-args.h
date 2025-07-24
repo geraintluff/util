@@ -34,10 +34,17 @@
 		// Exits with a help message (and list of commands) if no command matched
 		args.errorCommand();
 		
-	By default, a flag of "-h" (or a command of "help", if any commands are used) prints a help message.  To override:
+	By default, a flag of "-h" (or a command of "help", where commands are used) prints a help message.  To override:
 		SimpleArgs args(argc, argv);
 		args.helpFlag("h");
 		args.helpCommand("help");
+
+	You can peek at the next non-flag argument (always as a string):
+		std::string next = args.peek();
+
+	This is particularly useful for setting the help mode yourself, and providing custom usage help for triggering this:
+		args.setHelp(args.peek() == "help"); // special value for first arg
+		args.addUsage("help ..."); // includes anything already parsed
 	
 **/
 class SimpleArgs {
@@ -48,6 +55,7 @@ class SimpleArgs {
 	T valueFromString(const char *arg);
 	
 	std::string parsedCommand;
+	std::vector<std::string> customUsage;
 	struct Keywords {
 		std::string keyword;
 		std::string description;
@@ -134,9 +142,13 @@ public:
 		if (keywordOptions.size() > 0) {
 			parsedCommand += std::string(" <command>");
 		}
-		out << "Usage:\n\t" <<  parsedCommand << "\n\n";
+		out << Console::Bright << "Usage" << Console::Reset << "\n\t" <<  parsedCommand << "\n";
+		for (auto &line : customUsage) {
+			out << "\t" << line << "\n";
+		}
+		out << "\n";
 		if (keywordOptions.size() > 0) {
-			out << "Commands:\n";
+			out << Console::Bright << "Commands" << Console::Reset << "\n";
 			for (unsigned int i = 0; i < keywordOptions.size(); i++) {
 				out << "\t" << keywordOptions[i].keyword;
 				if (keywordOptions[i].isHelp) out << " [command...]";
@@ -146,7 +158,7 @@ public:
 			out << "\n";
 		}
 		if (argDetails.size() > 0) {
-			out << "Arguments:\n";
+			out << Console::Bright << "Arguments" << Console::Reset << "\n";
 			for (Keywords const &arg : argDetails) {
 				out << "\t" << arg.keyword;
 				if (arg.description.size()) out << "  -  " << arg.description;
@@ -155,7 +167,7 @@ public:
 			out << "\n";
 		}
 		if (flagOptions.size() > 0) {
-			out << "Options: " << Console::Dim << "(--arg=value)" << Console::Reset << "\n";
+			out << Console::Bright << "Options " << Console::Reset << Console::Dim << "(--arg=value)" << Console::Reset << "\n";
 			for (Keywords const &pair : flagOptions) {
 				out << "\t" << (pair.keyword.length() > 1 ? "--" : "-") << pair.keyword;
 				if (pair.description.size()) out << "  -  " << pair.description;
@@ -163,6 +175,10 @@ public:
 			}
 			out << "\n";
 		}
+	}
+	
+	void addUsage(const std::string &usage) {
+		customUsage.emplace_back(parsedCommand + " " + usage);
 	}
 	
 	bool isHelp() const {
@@ -254,6 +270,10 @@ public:
 		}
 		keywordOptions.push_back(Keywords{keyword, description, isHelp});
 		return false;
+	}
+	void setHelp(bool isHelp) {
+		helpMode = isHelp;
+		checkedHelpCommand = true;
 	}
 	bool helpCommand(std::string keyword="help") {
 		if (!checkedHelpCommand && index == 1) {
