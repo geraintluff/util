@@ -61,12 +61,15 @@ class SimpleArgs {
 		std::string description;
 		bool isHelp;
 	};
-	std::vector<Keywords> keywordOptions;
+	std::vector<Keywords> commandOptions;
 	std::vector<Keywords> argDetails;
 	std::vector<Keywords> flagOptions;
 	std::set<std::string> flagSet;
-	void clearKeywords() {
-		keywordOptions.resize(0);
+	void clearKeywords(const std::string &name) {
+		if (flagOptions.size()) {
+			parsedCommand += " [" + name + "-options]";
+		}
+		commandOptions.resize(0);
 		flagSet.clear();
 		flagOptions.clear();
 	}
@@ -139,20 +142,20 @@ public:
 
 	void help(std::ostream& out=std::cerr) const {
 		std::string parsedCommand = this->parsedCommand;
-		if (keywordOptions.size() > 0) {
-			parsedCommand += std::string(" <command>");
+		if (commandOptions.size() > 0) {
+			parsedCommand += " <command>";
 		}
 		out << Console::Bright << "Usage" << Console::Reset << "\n\t" <<  parsedCommand << "\n";
 		for (auto &line : customUsage) {
 			out << "\t" << line << "\n";
 		}
 		out << "\n";
-		if (keywordOptions.size() > 0) {
+		if (commandOptions.size() > 0) {
 			out << Console::Bright << "Commands" << Console::Reset << "\n";
-			for (unsigned int i = 0; i < keywordOptions.size(); i++) {
-				out << "\t" << keywordOptions[i].keyword;
-				if (keywordOptions[i].isHelp) out << " [command...]";
-				if (keywordOptions[i].description.size()) out << "  -  " << keywordOptions[i].description;
+			for (unsigned int i = 0; i < commandOptions.size(); i++) {
+				out << "\t" << commandOptions[i].keyword;
+				if (commandOptions[i].isHelp) out << " [command...]";
+				if (commandOptions[i].description.size()) out << "  -  " << commandOptions[i].description;
 				out << "\n";
 			}
 			out << "\n";
@@ -187,7 +190,8 @@ public:
 	bool finished() const {
 		return index >= argc;
 	}
-	std::string peek() const {
+	std::string peek() {
+		consumeFlags();
 		return (index >= argc) ? "" : argv[index];
 	}
 	
@@ -215,7 +219,7 @@ public:
 		return 0;
 	}
 	int errorCommand(std::string message="", std::ostream& out=std::cerr) const {
-		if (keywordOptions.size()) {
+		if (commandOptions.size()) {
 			// We expected a command, but didn't match on any
 			if (helpMode) return errorExit(out);
 			if (index >= argc && !hasError) help(out);
@@ -230,7 +234,7 @@ public:
 	template<typename T=std::string>
 	T arg(std::string name, std::string longName, T defaultValue) {
 		consumeFlags();
-		if (index < argc) clearKeywords();
+		if (index < argc) clearKeywords(name);
 		parsedCommand += std::string(" [") + name + "]";
 		argDetails.push_back(Keywords{name, longName, false});
 
@@ -241,7 +245,7 @@ public:
 	template<typename T=std::string>
 	T arg(std::string name, std::string longName="") {
 		consumeFlags();
-		if (index < argc) clearKeywords();
+		if (index < argc) clearKeywords(name);
 		parsedCommand += std::string(" <") + name + ">";
 		argDetails.push_back(Keywords{name, longName, false});
 
@@ -263,12 +267,12 @@ public:
 			helpCommand();
 		}
 		if (index < argc && !keyword.compare(argv[index])) {
-			clearKeywords();
+			clearKeywords(keyword);
 			index++;
-			if (!isHelp) parsedCommand += std::string(" ") + keyword;
+			if (!isHelp) parsedCommand += " " + keyword;
 			return true;
 		}
-		keywordOptions.push_back(Keywords{keyword, description, isHelp});
+		commandOptions.push_back(Keywords{keyword, description, isHelp});
 		return false;
 	}
 	void setHelp(bool isHelp) {
@@ -277,7 +281,7 @@ public:
 	}
 	bool helpCommand(std::string keyword="help") {
 		if (!checkedHelpCommand && index == 1) {
-			keywordOptions.push_back(Keywords{keyword, "", true});
+			commandOptions.push_back(Keywords{keyword, "", true});
 			if (index < argc && !keyword.compare(argv[index])) {
 				index++;
 				helpMode = true;
