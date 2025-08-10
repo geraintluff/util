@@ -76,24 +76,6 @@ public:
 	void resize(size_t length) {
 		samples.resize((offset + length)*channels, 0);
 	}
-	template<bool isConst>
-	class ChannelReader {
-		using CSample = typename std::conditional<isConst, const double, double>::type;
-		CSample *data;
-		size_t stride;
-	public:
-		ChannelReader(CSample *samples, size_t channels) : data(samples), stride(channels) {}
-		
-		CSample & operator [](size_t i) {
-			return data[i*stride];
-		}
-	};
-	ChannelReader<false> operator [](size_t c) {
-		return ChannelReader<false>(samples.data() + offset*channels + c, channels);
-	}
-	ChannelReader<true> operator [](size_t c) const {
-		return ChannelReader<true>(samples.data() + offset*channels + c, channels);
-	}
 	
 	Result result = Result(Result::Code::OK);
 
@@ -115,11 +97,11 @@ public:
 	static constexpr Format formatInt24 = Format::int24;
 	static constexpr Format formatFloat32 = Format::float32;
 
-	Format getFormat(uint16_t format, uint16_t bits) const {
-		if (format == 1/*PCM*/) {
+	Format getFormat(uint16_t formatCode, uint16_t bits) const {
+		if (formatCode == 1/*PCM*/) {
 			if (bits == 16) return formatInt16;
 			if (bits == 24) return formatInt24;
-		} else if (format == 3/*float*/) {
+		} else if (formatCode == 3/*float*/) {
 			if (bits == 32) return formatFloat32;
 		}
 		return formatInvalid;
@@ -138,32 +120,30 @@ public:
 		auto blockStart = file.tellg(); // start of the blocks - we will seek back to here periodically
 		bool hasFormat = false, hasData = false;
 		
-		Format format = Format::invalid; // Shouldn't matter, we should always read the `fmt ` chunk before `data`
+		Format format = Format::invalid; // We skip through to always read the `fmt ` chunk before `data`
 		while (!file.eof()) {
 			auto blockType = read32(file), blockLength = read32(file);
 			if (file.eof()) break;
-			if (!hasFormat && blockType == value_fmt) {
-				auto formatInt = read16(file);
-				format = (Format)formatInt;
+			if (blockType == value_fmt && !hasFormat) {
+				auto formatCode = read16(file);
 				channels = read16(file);
-				if (channels < 1) return result = Result(Result::Code::FORMAT_ERROR, "Cannot have zero channels");
-				
 				sampleRate = read32(file);
-				if (sampleRate < 1) return result = Result(Result::Code::FORMAT_ERROR, "Cannot have zero sampleRate");
-
 				auto expectedBytesPerSecond = read32(file);
 				auto bytesPerFrame = read16(file);
 				auto bitsPerSample = read16(file);
-				format = getFormat(formatInt, bitsPerSample);
-				if (!format == formatInvalid) return result = Result(Result::Code::UNSUPPORTED, "Unsupported format:bits: " + std::to_string(formatInt) + ":" + std::to_string(bitsPerSample));
+				format = getFormat(formatCode, bitsPerSample);
+
+				if (channels < 1) return result = Result(Result::Code::FORMAT_ERROR, "Cannot have zero channels");
+				if (sampleRate < 1) return result = Result(Result::Code::FORMAT_ERROR, "Cannot have zero sampleRate");
+				if (format == formatInvalid) return result = Result(Result::Code::UNSUPPORTED, "Unsupported format:bits: " + std::to_string(formatCode) + ":" + std::to_string(bitsPerSample));
 				// Since it's plain WAVE, we can do some extra checks for consistency
 				if (bitsPerSample*channels != bytesPerFrame*8) return result = Result(Result::Code::FORMAT_ERROR, "Format sizes don't add up");
 				if (expectedBytesPerSecond != sampleRate*bytesPerFrame) return result = Result(Result::Code::FORMAT_ERROR, "Format sizes don't add up");
 
 				hasFormat = true;
 				file.clear();
-				file.seekg(blockStart);
-			} else if (hasFormat && blockType == value_data) {
+				file.seekg(blockStart); // rewind, since `fmt ` isn't necessarily the first chunk
+			} else if (blockType == value_data && hasFormat) {
 				std::vector<double> samples(0);
 				if (format == formatInt16) {
 					samples.reserve(blockLength/2);
@@ -190,10 +170,10 @@ public:
 				} else if (format == formatFloat32) {
 					samples.reserve(blockLength/4);
 					for (size_t i = 0; i < blockLength/4; ++i) {
-						uint32_t intValue = read32(file);
+						uint32_t intValue = read32(file); // little-endian
 						if (file.eof()) break;
 						float floatValue;
-						static_assert(sizeof(float) == sizeof(uint32_t), "floats must be 32-bit");
+						static_assert(sizeof(float) == sizeof(uint32_t), "`float` must be 32-bit");
 						std::memcpy(&floatValue, &intValue, sizeof(float));
 						samples.push_back(floatValue);
 					}
@@ -205,7 +185,7 @@ public:
 				offset = 0;
 				hasData = true;
 			} else {
-				// We either don't recognise
+				// We either don't recognise this block, or we're not in the right state to read it
 				file.ignore(blockLength);
 			}
 		}
@@ -248,7 +228,7 @@ public:
 		// "fmt " block
 		write32(file, value_fmt);
 		write32(file, 16); // block length
-		write16(file, (uint16_t)format);
+		write16(file, (uint16_t)formatCode);
 		write16(file, channels);
 		write32(file, sampleRate);
 		unsigned int expectedBytesPerSecond = sampleRate*channels*bytesPerSample;
@@ -286,6 +266,8 @@ public:
 				write32(file, intValue);
 			}
 			break;
+		default:
+			return result = Result(Result::Code::FORMAT_ERROR, "Unsupported output format");
 		}
 		return result = Result(Result::Code::OK);
 	}
@@ -316,5 +298,24 @@ public:
 			double gain = absLevel/maxAbs;
 			for (auto &s : samples) s *= gain;
 		}
+	}
+
+	// Support sample access as `wav[channel][index]`
+	template<typename Sample>
+	class Interleaved {
+		Sample *data;
+		size_t stride;
+	public:
+		Interleaved(Sample *data, size_t stride) : data(data), stride(stride) {}
+		
+		Sample & operator[](size_t i) {
+			return data[i*stride];
+		}
+	};
+	Interleaved<double> operator [](size_t c) {
+		return {samples.data() + offset*channels + c, channels};
+	}
+	Interleaved<const double> operator [](size_t c) const {
+		return {samples.data() + offset*channels + c, channels};
 	}
 };
