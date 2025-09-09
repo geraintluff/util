@@ -54,6 +54,19 @@ class SimpleArgs {
 	template<typename T>
 	T valueFromString(const char *arg);
 	
+	template<typename T>
+	std::vector<T> listFromString(const std::string &str, const std::string &separator=",") {
+		std::vector<T> result;
+		size_t start = 0;
+		while (start < str.size()) {
+			size_t end = (separator.size() > 0) ? str.find(separator, start) : (start + 1);
+			result.push_back(valueFromString<T>(str.substr(start, end - start).c_str()));
+			if (end == std::string::npos) break;
+			start = end + separator.size();
+		}
+		return result;
+	}
+
 	std::string parsedCommand;
 	std::vector<std::string> customUsage;
 	struct Keywords {
@@ -260,6 +273,24 @@ public:
 
 		return valueFromString<T>(argv[index++]);
 	}
+	template<typename T=std::string>
+	std::vector<T> argList(std::string name, std::string longName="", const std::string &separator=",") {
+		consumeFlags();
+		if (index < argc) clearKeywords(name);
+		parsedCommand += std::string(" <") + name + ">";
+		argDetails.push_back(Keywords{name, longName, false});
+
+		if (index >= argc) {
+			if (longName.length() > 0) {
+				setError("Missing " + longName + " <" + name + ">");
+			} else {
+				setError("Missing argument <" + name + ">");
+			}
+			return T();
+		}
+
+		return listFromString<T>(argv[index++]);
+	}
 
 	bool command(std::string keyword, std::string description="", bool isHelp=false) {
 		consumeFlags();
@@ -340,6 +371,16 @@ public:
 		auto iterator = flagMap.find(key);
 		helpMode = (iterator != flagMap.end());
 		return helpMode;
+	}
+	
+	template<typename T=std::string>
+	std::vector<T> flagList(std::string key, std::string description="", const std::string &separator=",") {
+		consumeFlags();
+		std::vector<T> result;
+		if (!hasFlag(key, description)) return {};
+
+		auto iterator = flagMap.find(key);
+		return listFromString<T>(iterator->second, separator);
 	}
 };
 
