@@ -28,8 +28,8 @@
 		}
 	};
 #else
-	if __cplusplus >= 202302L
- 		warning "The `StopDenormals` class doesn't do anything for this architecture"
-	endif
+#	if __cplusplus >= 202302L
+#		warning "The `StopDenormals` class doesn't do anything for this architecture"
+#	endif
 	class StopDenormals {}; // FIXME: add for other architectures
 #endif
