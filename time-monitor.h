@@ -43,7 +43,6 @@ private:
 		} else if (time.tv_nsec >= 1000000000) {
 			time = {time.tv_sec + 1, time.tv_nsec - 1000000000};
 		}
-		return *this;
 	}
 public:
 	using Time = timespec;
