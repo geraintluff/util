@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <iostream>
+#include <fstream>
 
 // This isn't for microbenchmarks, but collecting rough performance stats to identify problem areas
 // so our goal is to get the fastest timestamp with enough accuracy that the averages are meaningful.
@@ -230,6 +231,7 @@ private:
 	using Event = _timemonitor_impl::Event;
 
 	EventListSet &eventLists;
+	CpuTime refTime;
 	size_t depth = 0;
 
 	EventList *claimedList = nullptr;
@@ -238,6 +240,7 @@ private:
 
 	inline void tryClaim() {
 		events = eventsEnd = nullptr;
+		if (!enabled) return;
 		for (auto &list : eventLists) {
 			events = list.claimFromWriter();
 			if (events) {
@@ -249,10 +252,14 @@ private:
 	}
 	
 	inline void enter(const char *name, double refSeconds) {
-		if (depth == 0) tryClaim();
+		auto now = CpuTime::now();
+		if (depth == 0) {
+			tryClaim();
+			refTime = now;
+		}
 		++depth;
 		if (events && events < eventsEnd) {
-			*events = {depth, name, CpuTime::now(), refSeconds};
+			*events = {depth, name, now - refTime, refSeconds};
 			++events;
 		} else {
 			events = nullptr;
@@ -261,7 +268,8 @@ private:
 	inline void leave() {
 		--depth;
 		if (events && events < eventsEnd) {
-			*events = {depth, "", CpuTime::now()};
+			auto now = CpuTime::now();
+			*events = {depth, "", now - refTime};
 			++events;
 		} else {
 			events = nullptr;
@@ -279,7 +287,7 @@ struct TimeMonitor {
 			eventLists.emplace_back(initialSize);
 		}
 	}
-
+	
 	using EventSource = TimeMonitorEventSource;
 	EventSource eventSource() {
 		return {eventLists};
@@ -308,55 +316,89 @@ struct TimeMonitor {
 		}
 	};
 
-	struct ReportItem {
-		size_t depth;
-		std::string name;
+	struct ReportItem;
+	struct Report {
+		std::unordered_map<std::string, ReportItem> items;
+		
+		void clear() {
+			items.clear();
+		}
 
+		struct Named {
+			const std::string &name;
+			const ReportItem &item;
+		};
+		std::vector<Named> named(bool lengthSort=false) const {
+			// A pointer version so we can sort them, and also not re-allocate strings
+			struct PtrNamed {
+				const std::string *name;
+				const ReportItem *item;
+			};
+			std::vector<PtrNamed> ptrResult;
+			ptrResult.reserve(items.size());
+			for (auto &pair : items) {
+				ptrResult.emplace_back(PtrNamed{&pair.first, &pair.second});
+			}
+			if (!lengthSort) {
+				// Earliest first
+				std::sort(ptrResult.begin(), ptrResult.end(), [](const PtrNamed &a, const PtrNamed &b){
+					return a.item->start.mean() < b.item->start.mean();
+				});
+			} else {
+				// Longest first
+				std::sort(ptrResult.begin(), ptrResult.end(), [](const PtrNamed &a, const PtrNamed &b){
+					return a.item->duration.mean() > b.item->duration.mean();
+				});
+			}
+			
+			std::vector<Named> result;
+			result.reserve(ptrResult.size());
+			for (auto &p : ptrResult) {
+				result.emplace_back(Named{*p.name, *p.item});
+			}
+			return result;
+		}
+		
+		template<class Fn>
+		void forEach(Fn &&fn, bool lengthSort=false, size_t depth=0) const {
+			for (auto &namedItem : named(lengthSort)) {
+				fn(namedItem.name, namedItem.item, depth);
+				namedItem.item.subReport.forEach(fn, lengthSort, depth + 1);
+			}
+		}
+
+		void log() const {
+			std::vector<double> refSeconds;
+			size_t indent = 0;
+			size_t prevDepth = 0;
+			forEach([&](auto &name, auto &item, size_t depth) {
+				for (size_t i = 0; i + 2 < depth; ++i) std::cout << " |";
+				std::cout << (depth > 1 ? " \\_ " : "_ ");
+				prevDepth = depth;
+				refSeconds.resize(depth);
+
+				double itemRefSeconds = item.refSeconds.sum;
+				if (!itemRefSeconds && !refSeconds.empty()) itemRefSeconds = refSeconds.back();
+				refSeconds.push_back(itemRefSeconds);
+				if (itemRefSeconds) {
+					double ratio = item.duration.sum/itemRefSeconds;
+					std::cout << (ratio*100) << "%\t";
+				}
+				std::cout << name << "\n";
+			});
+		}
+	};
+	struct ReportItem {
 		Stats start, duration;
 		Stats refSeconds;
+		
+		Report subReport;
 	};
+	Report report;
 
 	void reset() {
-		itemMap.clear();
+		report.clear();
 		depth = 0;
-	}
-
-	std::vector<ReportItem> items() const {
-		std::vector<ReportItem> result;
-		for (auto &pair : itemMap) {
-			result.emplace_back(pair.second);
-		}
-		// Inherit reference times
-		for (size_t i = 0; i < result.size(); ++i) {
-			for (size_t j = 0; j < result.size(); ++j) {
-				if (i == j) continue;
-				auto &a = result[i], &b = result[j];
-				if (a.name.size() > b.name.size() && a.name.substr(0, b.name.size()) == b.name) {
-					if (!a.refSeconds.mean() && b.refSeconds.mean() > 0) {
-						a.refSeconds = b.refSeconds;
-					}
-				}
-			}
-		}
-		std::sort(result.begin(), result.end(), [](const ReportItem &a, const ReportItem &b){
-			return a.start.mean() < b.start.mean();
-		});
-		return result;
-	}
-	
-	void log(std::ostream &output=std::cout, bool includeTrivial=false) const {
-		for (auto &item : items()) {
-			if (!includeTrivial && item.duration.count < 0.001) continue;
-			
-			output << item.name;
-//				output << " @ " << item.start.mean();
-			
-			if (item.refSeconds.sum > 0 && item.duration.sum > 0) {
-				double ratio = item.duration.sum/item.refSeconds.sum;
-				output << "\t" << (ratio*100) << "%";
-			}
-			output << "\n";
-		}
 	}
 
 	void update(double averagePeriod=-1) {
@@ -367,53 +409,42 @@ struct TimeMonitor {
 			}
 		}
 	}
+	
+	std::string filePerfettoJson;
 private:
 	using EventListSet = _timemonitor_impl::EventListSet;
 	using EventList = _timemonitor_impl::EventList;
 	using Event = _timemonitor_impl::Event;
 	EventListSet eventLists; // fixed size, must not be reallocated after construction
-
-	std::unordered_map<std::string, ReportItem> itemMap;
-	ReportItem & addToStats(const std::string &name, double start) {
-		auto &item = itemMap[name];
-		item.start.add(start);
-		return item;
-	}
-	void addToStats(const std::string &name, double start, double duration) {
-		auto &item = addToStats(name, start);
-		item.duration.add(duration);
+	
+	ReportItem & getCurrentItem() {
+		ReportItem *ri = nullptr;
+		for (auto &scopeName : scopedNames) {
+			Report &rep = (ri ? ri->subReport : report);
+			auto &item = rep.items[scopeName];
+			ri = &item;
+		}
+		return *ri;
 	}
 	
 	// Time that the latest top-level scope was opened
-	CpuTime refTime;
 	size_t depth = 0;
 	std::vector<double> scopedTimes;
 	std::vector<std::string> scopedNames;
-	void resetEventHandling() {
-		depth = 0;
-		scopedTimes.resize(0);
-		scopedNames.resize(0);
-	}
-	
+		
 	void processEvent(const Event &event) {
 		scopedNames.resize(depth);
 		scopedTimes.resize(depth);
 
-		auto pushName = [&](const char *label){
-			if (scopedNames.empty()) {
-				scopedNames.emplace_back(label);
-			} else {
-				scopedNames.emplace_back(scopedNames.back() + " / " + label);
-			}
-		};
+		auto eventTime = event.time.seconds();
 
-		auto eventTime = (event.time - refTime).seconds();
-
-		if (event.label[0] == '\0') {
+		if (event.label[0] == '\0') { // empty string
 			if (depth == event.depth + 1) {
 				auto startTime = scopedTimes.back();
 				auto duration = eventTime - startTime;
-				addToStats(scopedNames.back(), startTime, duration);
+				auto &item = getCurrentItem();
+				item.start.add(startTime);
+				item.duration.add(duration);
 
 				--depth;
 				scopedNames.pop_back();
@@ -424,32 +455,41 @@ private:
 
 		// If it's not increasing the depth, then it's an unscoped event
 		if (depth == event.depth) {
-			pushName(event.label);
-			addToStats(scopedNames.back(), eventTime);
+			scopedNames.emplace_back(event.label);
+			auto &item = getCurrentItem();
+			item.start.add(eventTime);
 			scopedNames.pop_back();
 			return;
 		}
 
-		// update the reference time only when at top-level scope
-		if (depth == 0) {
-			refTime = event.time;
-			eventTime = (event.time - refTime).seconds();
-		}
-
 		if (depth + 1 == event.depth) { // Opening an event scope
+			scopedNames.emplace_back(event.label);
 			scopedTimes.emplace_back(eventTime);
-			pushName(event.label);
 
-			auto &item = itemMap[scopedNames.back()];
-			if (item.name.empty()) item.name = scopedNames.back();
-			item.depth = depth;
+			auto &item = getCurrentItem();
 			if (event.refSeconds > 0) item.refSeconds.add(event.refSeconds);
 			++depth;
 		}
 	}
+	
+	void decayAndPrune(Report &report, double ratio, double pruneLimit) {
+		for (auto iter = report.items.begin(); iter != report.items.end(); ) {
+			auto &item = iter->second;
+			if (item.start.count < pruneLimit) {
+				iter = report.items.erase(iter);
+				continue;
+			}
+			item.start.decay(ratio);
+			item.duration.decay(ratio);
+			item.refSeconds.decay(ratio);
+			decayAndPrune(item.subReport, ratio, pruneLimit);
+		}
+	}
 
 	void updateFromEvents(Event *events, size_t eventCount, double averagePeriod) {
-//		resetEventHandling();
+		if (!eventCount) return;
+		createOrAppendPerfettoJson(events, eventCount);
+
 		for (size_t i = 0; i < eventCount; ++i) {
 			processEvent(events[i]);
 		}
@@ -457,20 +497,41 @@ private:
 		// Check maximum reference time and use it for moving-average decay
 		if (depth == 0 && averagePeriod > 0) {
 			double maxPeriod = 0;
-			for (auto &pair : itemMap) {
+			for (auto &pair : report.items) {
 				auto &item = pair.second;
 				if (item.refSeconds.sum > maxPeriod) maxPeriod = item.refSeconds.sum;
 			}
-			averagePeriod *= 0.36788;
 			if (maxPeriod > averagePeriod) {
-				double decay = averagePeriod/maxPeriod;
-				for (auto &pair : itemMap) {
-					auto &item = pair.second;
-					item.start.decay(decay);
-					item.duration.decay(decay);
-					item.refSeconds.decay(decay);
-				}
+				decayAndPrune(report, averagePeriod/maxPeriod, 0.1);
 			}
+		}
+	}
+
+	void createOrAppendPerfettoJson(Event *events, size_t eventCount) {
+		if (!filePerfettoJson.empty()) {
+			std::ofstream output(filePerfettoJson, std::ios::binary | std::ios::ate);
+			if (output) {
+				if (output.tellp() == 0) {
+					output << "[\n";
+				} else {
+					output.seekp(-1, std::ios_base::end); // skip the closing `]` (if there is one)
+					output << ",\n";
+				}
+				for (size_t i = 0; i < eventCount; ++i) {
+					if (i > 0) output << ",\n";
+					auto &event = events[i];
+					auto ns = static_cast<unsigned long long>(std::round(event.time.seconds()*1e6));
+					if (event.label[0] != '\0') {
+						output << "{\"ph\":\"B\",\"pid\":0,\"tid\":0,\"ts\":" << ns << ",\"name\":\"" << event.label << "\"}";
+					} else {
+						output << "{\"ph\":\"E\",\"pid\":0,\"tid\":0,\"ts\":" << ns << "}";
+					}
+				}
+				output << "]";
+			} else {
+				std::cerr << "Failed to write Perfetto JSON: " << filePerfettoJson << std::endl;
+			}
+			output.flush();
 		}
 	}
 };
