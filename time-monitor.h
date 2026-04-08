@@ -134,17 +134,17 @@ namespace _timemonitor_impl {
 			return nullptr;
 		}
 		void releaseFromWriter(Event *writerEvent) {
-			if (writerEvent <= events.data() + events.size()) {
-				// Only keep event sequence if it's complete
+			if (writerEvent != nullptr) {
 				filledToIndex = size_t(writerEvent - events.data());
 			} else {
+				// Passing null means the event-source ran out of space, so we throw away all the new ones
 				wantsToGrow = true;
 			}
 			claimed = false;
 		}
 
 		bool mayContainEvents() const { // Doesn't guarantee it *can* be claimed (or have anything to process) but avoids claiming unnecessarily
-			return (filledToIndex > 0) && !claimed;
+			return (filledToIndex > 0 || wantsToGrow) && !claimed;
 		}
 		bool claimFromReport() {
 			return !claimed.exchange(true);
@@ -253,15 +253,19 @@ private:
 		++depth;
 		if (events && events < eventsEnd) {
 			*events = {depth, name, CpuTime::now(), refSeconds};
+			++events;
+		} else {
+			events = nullptr;
 		}
-		++events;
 	}
 	inline void leave() {
 		--depth;
 		if (events && events < eventsEnd) {
 			*events = {depth, "", CpuTime::now()};
+			++events;
+		} else {
+			events = nullptr;
 		}
-		++events;
 		if (depth == 0) {
 			if (claimedList) claimedList->releaseFromWriter(events);
 			claimedList = nullptr;
