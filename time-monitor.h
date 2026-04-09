@@ -11,7 +11,7 @@
 
 // This isn't for microbenchmarks, but collecting rough performance stats to identify problem areas
 // so our goal is to get the fastest timestamp with enough accuracy that the averages are meaningful.
-#if defined(WINDOWS)
+#if defined(WIN32) || defined(_WIN32)
 #	include <windows.h>
 namespace signalsmith {
 struct CpuTime {
@@ -35,6 +35,26 @@ struct CpuTime {
 	CpuTime operator-(const CpuTime &other) const {
 		return {time - other.time};
 	}
+#elif __APPLE__
+#	include <time.h>
+namespace signalsmith {
+struct CpuTime {
+	using Time = uint64_t;
+	
+	static CpuTime now() {
+		return {clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)};
+	}
+	double seconds() const {
+		return time*1e-9;
+	}
+
+	CpuTime operator+(const CpuTime &other) const {
+		return {time + other.time};
+	}
+	CpuTime operator-(const CpuTime &other) const {
+		return {time - other.time};
+	}
+	
 #elif defined(__has_include) && __has_include(<time.h>)
 #	include <time.h>
 namespace signalsmith {
@@ -52,8 +72,8 @@ public:
 	
 	static CpuTime now() {
 		CpuTime result;
-#ifdef CLOCK_MONOTONIC_COARSE // CLOCK_THREAD_CPUTIME_ID seems better, but it's slow enough to be a problem for measuring DSP code
-		auto errorCode = clock_gettime(CLOCK_MONOTONIC_COARSE, &result.time);
+#ifdef CLOCK_MONOTONIC_RAW
+		auto errorCode = clock_gettime(CLOCK_MONOTONIC_RAW, &result.time);
 #elif defined(CLOCK_MONOTONIC_FAST)
 		auto errorCode = clock_gettime(CLOCK_MONOTONIC_FAST, &result.time);
 #else
