@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <iostream>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 
 // This isn't for microbenchmarks, but collecting rough performance stats to identify problem areas
@@ -189,67 +190,57 @@ namespace _timemonitor_impl {
 // Once constructed (or obtained from `TimeMonitor::eventSource()`, this should be used by a single thread (at a time)
 // It's fairly small (5 pointers) and doesn't allocate, so could be a thread-local to get an automatic scope
 struct TimeMonitorEventSource {
-	bool enabled = true;
+	int interval; // 1 = sample every call, 100 = sample every 50th-150th call (pseudo-random variation)
 
-	TimeMonitorEventSource(_timemonitor_impl::EventListSet &eventLists) : eventLists(eventLists) {}
+	TimeMonitorEventSource(_timemonitor_impl::EventListSet &eventLists, int interval=1) : interval(interval), eventLists(eventLists) {}
 	// Move but not copy
-	TimeMonitorEventSource(TimeMonitorEventSource &&other) : eventLists(other.eventLists) {
+	TimeMonitorEventSource(TimeMonitorEventSource &&other) : interval(other.interval), eventLists(other.eventLists) {
 		if (other.depth > 0) abort(); // Nope
 		// events/eventsEnd/claimedList/depth shouldn't be set if depth is 0
 	}
 	TimeMonitorEventSource(const TimeMonitorEventSource &other) = delete;
 
-	struct Scoped {
+	struct Scope {
 		// No copy/move/etc.
-		Scoped(const Scoped &other) = delete;
-		Scoped(Scoped &&other) = delete;
+		Scope(const Scope &other) = delete;
+		Scope(Scope &&other) = delete;
 		
-		~Scoped() {
+		~Scope() {
+			if (hasTaskLayer) eventSource.leave();
 			eventSource.leave();
 		}
-		
-		void replace(const char *newLabel, double refSeconds=0) {
-			eventSource.leave();
-			label = newLabel;
-			eventSource.enter(label, refSeconds);
-		}
-		
-		Scoped scoped(const char *newLabel, double refSeconds=0) {
-			return Scoped(eventSource, newLabel, refSeconds);
-		}
-		Scoped scoped(const char *newLabel, float refSeconds) {
-			return Scoped(eventSource, newLabel, double(refSeconds));
-		}
-		template<class Fn>
-		void scoped(const char *label, Fn &&fn, double refSeconds=0) {
-			Scoped sub{eventSource, label, refSeconds};
-			fn();
+
+		// Easy way to subdivide a long function
+		void operator()(const char *taskLabel) {
+			if (hasTaskLayer) eventSource.leave();
+			hasTaskLayer = true;
+			eventSource.enter(taskLabel, 0);
 		}
 	private:
 		TimeMonitorEventSource &eventSource;
-		const char *label;
+		bool hasTaskLayer = false;
 
 		friend struct TimeMonitorEventSource;
-		Scoped(TimeMonitorEventSource &eventSource, const char *label, double refSeconds) : eventSource(eventSource), label(label) {
+		Scope(TimeMonitorEventSource &eventSource, const char *label, double refSeconds) : eventSource(eventSource) {
 			eventSource.enter(label, refSeconds);
 		}
 	};
 	
-	Scoped scoped(const char *label, double refSeconds=0) {
-		return Scoped{*this, label, refSeconds};
-	}
-	Scoped scoped(const char *label, float refSeconds) {
-		return Scoped{*this, label, double(refSeconds)};
-	}
-	template<class Fn>
-	void scoped(const char *label, Fn &&fn, double refSeconds=0) {
-		Scoped sub{*this, label, refSeconds};
-		fn();
+	Scope scope(const char *label, double refSeconds=0) {
+		return Scope{*this, label, refSeconds};
 	}
 private:
 	using EventListSet = _timemonitor_impl::EventListSet;
 	using EventList = _timemonitor_impl::EventList;
 	using Event = _timemonitor_impl::Event;
+	
+	bool skip = false;
+	int intervalCounter = 0;
+	int fastrandState = std::rand();
+	int fastrand() { // Thanks, Intel. Thintel.
+		fastrandState = 214013*fastrandState + 2531011;
+		return (fastrandState>>16)&0x7FFF;
+	}
 
 	EventListSet &eventLists;
 	CpuTime refTime;
@@ -260,8 +251,14 @@ private:
 	Event *eventsEnd = nullptr;
 
 	inline void tryClaim() {
+		skip = true;
 		events = eventsEnd = nullptr;
-		if (!enabled) return;
+
+		if (++intervalCounter < interval) return;
+		if (!interval) return;
+		intervalCounter = 0;
+		if (interval > 1) intervalCounter = (fastrand()%interval) - interval/2;
+
 		for (auto &list : eventLists) {
 			events = list.claimFromWriter();
 			if (events) {
@@ -270,34 +267,31 @@ private:
 				break;
 			}
 		}
+		skip = (events == nullptr);
 	}
 	
 	inline void enter(const char *name, double refSeconds) {
-		auto now = CpuTime::now();
-		if (depth == 0) {
-			tryClaim();
-			refTime = now;
-		}
+		if (depth == 0) tryClaim();
 		++depth;
+		if (skip) return;
 		if (events && events < eventsEnd) {
-			*events = {depth, name, now - refTime, refSeconds};
+			if (depth == 1) refTime = CpuTime::now();
+			*events = {depth, name, CpuTime::now() - refTime, refSeconds};
 			++events;
-		} else {
-			events = nullptr;
 		}
 	}
 	inline void leave() {
 		--depth;
+		if (skip) return;
 		if (events && events < eventsEnd) {
 			auto now = CpuTime::now();
 			*events = {depth, "", now - refTime};
 			++events;
-		} else {
-			events = nullptr;
 		}
 		if (depth == 0) {
 			if (claimedList) claimedList->releaseFromWriter(events);
 			claimedList = nullptr;
+			skip = false;
 		}
 	}
 };
@@ -310,8 +304,8 @@ struct TimeMonitor {
 	}
 	
 	using EventSource = TimeMonitorEventSource;
-	EventSource eventSource() {
-		return {eventLists};
+	EventSource eventSource(int interval=1) {
+		return {eventLists, interval};
 	}
 
 	// Report data/methods
