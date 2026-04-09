@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <iostream>
+#include <cstdio>
 #include <fstream>
 
 // This isn't for microbenchmarks, but collecting rough performance stats to identify problem areas
@@ -367,13 +368,13 @@ struct TimeMonitor {
 			}
 		}
 
-		void log() const {
+		void log(bool longestFirst=false) const {
 			std::vector<double> refSeconds;
 			size_t indent = 0;
 			size_t prevDepth = 0;
 			forEach([&](auto &name, auto &item, size_t depth) {
-				for (size_t i = 0; i + 2 < depth; ++i) std::cout << " |";
-				std::cout << (depth > 1 ? " \\_ " : "_ ");
+				for (size_t i = 0; i + 2 < depth; ++i) std::cout << " | ";
+				if (depth > 0) std::cout << " \\__ ";
 				prevDepth = depth;
 				refSeconds.resize(depth);
 
@@ -382,10 +383,10 @@ struct TimeMonitor {
 				refSeconds.push_back(itemRefSeconds);
 				if (itemRefSeconds) {
 					double ratio = item.duration.sum/itemRefSeconds;
-					std::cout << (ratio*100) << "%\t";
+					std::printf("%#5.2f%% ", ratio*100);
 				}
 				std::cout << name << "\n";
-			});
+			}, longestFirst);
 		}
 	};
 	struct ReportItem {
