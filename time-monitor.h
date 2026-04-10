@@ -126,6 +126,91 @@ struct CpuTime {
 	CpuTime(Time time) : time(time) {}
 };
 
+#ifdef SIGNALSMITH_TIME_MONITOR_SKIP
+
+struct TimeMonitor;
+
+struct TimeMonitorEventSource {
+	int interval;
+
+	TimeMonitorEventSource(TimeMonitorEventSource &&other) {}
+	TimeMonitorEventSource(const TimeMonitorEventSource &other) = delete;
+
+	struct Scope {
+		// No copy/move/etc.
+		Scope(const Scope &other) = delete;
+		Scope(Scope &&other) = delete;
+		
+		void operator()(const char *taskLabel) {}
+	private:
+		friend struct TimeMonitorEventSource;
+		Scope(TimeMonitorEventSource &) {}
+	};
+	
+	Scope scope(const char *, double=0) {
+		return Scope{*this};
+	}
+private:
+	friend struct TimeMonitor;
+	TimeMonitorEventSource(TimeMonitor &) {}
+};
+
+struct TimeMonitor {
+	TimeMonitor(size_t listCount=2, size_t initialSize=256) {}
+	
+	using EventSource = TimeMonitorEventSource;
+	EventSource eventSource(int interval=1) {
+		return {*this};
+	}
+
+	// Report data/methods
+
+	struct Stats {
+		double count = 0; // observations, as floating-point so we can decay it
+		double sum = 0;
+		double sum2 = 0;
+		
+		double mean() const {
+			return (count > 0) ? sum/count : 0;
+		}
+	};
+
+	struct ReportItem;
+	struct Report {
+		std::unordered_map<std::string, ReportItem> items;
+		
+		void clear() {}
+
+		struct Named {
+			const std::string &name;
+			const ReportItem &item;
+		};
+		std::vector<Named> named(bool lengthSort=false) const {
+			return {};
+		}
+		
+		template<class Fn>
+		void forEach(Fn &&fn, bool lengthSort=false, size_t depth=0) const {}
+
+		void log(bool longestFirst=false) const {}
+	};
+	struct ReportItem {
+		Stats start, duration;
+		Stats refSeconds;
+		
+		Report subReport;
+	};
+	Report report;
+
+	void reset() {}
+
+	void update(double averagePeriod=-1) {}
+	
+	std::string filePerfettoJson;
+};
+
+#else // SIGNALSMITH_TIME_MONITOR_SKIP
+
 namespace _timemonitor_impl {
 	struct Event {
 		size_t depth;
@@ -295,7 +380,7 @@ private:
 		}
 	}
 };
-	
+
 struct TimeMonitor {
 	TimeMonitor(size_t listCount=2, size_t initialSize=256) {
 		while (eventLists.size() < listCount) {
@@ -550,5 +635,7 @@ private:
 		}
 	}
 };
+
+#endif // SIGNALSMITH_TIME_MONITOR_SKIP
 
 } // namespace
